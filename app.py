@@ -37,6 +37,7 @@ DEFAULT_TOPK = 10
 DEFAULT_REPO_OWNER = st.secrets.get("REPO_OWNER", "letsgo999")
 DEFAULT_REPO_NAME = st.secrets.get("REPO_NAME", "sourcefinder-app")
 DEFAULT_REPO_BRANCH = st.secrets.get("REPO_BRANCH", "main")
+DEFAULT_GITHUB_TOKEN = st.secrets.get("GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
 
 
 # ─────────────────────────────────────────────────────────
@@ -151,10 +152,11 @@ def _list_github_data_files(owner: str, repo: str, branch: str, subdir: str = "d
     base = f"https://api.github.com/repos/{owner}/{repo}/contents/{subdir}?ref={branch}"
     stack = [base]
     files: list[dict] = []
+    headers = {"Authorization": f"token {DEFAULT_GITHUB_TOKEN}"} if DEFAULT_GITHUB_TOKEN else {}
     while stack:
         url = stack.pop()
         try:
-            r = requests.get(url, timeout=10)
+            r = requests.get(url, timeout=10, headers=headers)
             if r.status_code != 200:
                 continue
             items = r.json()
@@ -174,12 +176,13 @@ def _list_github_data_files(owner: str, repo: str, branch: str, subdir: str = "d
 
 def _read_remote_files(file_meta: list[dict]) -> list[pd.DataFrame]:
     dfs: list[pd.DataFrame] = []
+    headers = {"Authorization": f"token {DEFAULT_GITHUB_TOKEN}"} if DEFAULT_GITHUB_TOKEN else {}
     for it in file_meta:
         url = it.get("download_url")
         if not url:
             continue
         try:
-            r = requests.get(url, timeout=20)
+            r = requests.get(url, timeout=20, headers=headers)
             if r.status_code != 200:
                 continue
             data = r.content
