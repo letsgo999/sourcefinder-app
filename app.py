@@ -1,4 +1,6 @@
+# app.py
 # -*- coding: utf-8 -*-
+
 import re
 import io
 import glob
@@ -13,19 +15,31 @@ import tldextract
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+
+# ─────────────────────────────────────────────────────────────
+# 기본 세팅
+# ─────────────────────────────────────────────────────────────
 st.set_page_config(page_title="자료 소스 탐색기 GPT (SourceFinder)", layout="wide")
+
 st.title("자료 소스 탐색기 GPT (SourceFinder)")
-st.caption("업로드된 데이터셋을 1차 근거로 정렬합니다. 기준: (1) 의미 유사도 (2) 직매칭 (3) 국내/공공 가중치")
+st.caption(
+    "업로드된 데이터셋을 1차 근거로 정렬합니다. 정렬 기준: "
+    "(1) 의미 유사도 (2) 키워드/도메인 직매칭 (3) 국내/공공 가중치"
+)
 
 DATA_DIR = "data"
 DEFAULT_TOPK = 10
 
-# ── 유틸 ─────────────────────────────────────────────────────
-def detect_encoding(path):
+
+# ─────────────────────────────────────────────────────────────
+# 유틸 함수
+# ─────────────────────────────────────────────────────────────
+def detect_encoding(path: str) -> str:
     with open(path, "rb") as f:
         raw = f.read()
     res = chardet.detect(raw)
     return res.get("encoding") or "utf-8"
+
 
 def find_url_column(df: pd.DataFrame) -> str | None:
     candidates = ["url", "url주소", "주소", "link", "링크"]
@@ -35,16 +49,20 @@ def find_url_column(df: pd.DataFrame) -> str | None:
             return c
     return None
 
-def normalize_text(x):
+
+def normalize_text(x) -> str:
     if pd.isna(x):
         return ""
     return str(x)
 
+
 def concat_fields(row: pd.Series, text_cols: list[str]) -> str:
     return " ".join(normalize_text(row.get(c, "")) for c in text_cols)
 
+
 def has_hangul(s: str) -> bool:
     return bool(re.search(r"[가-힣]", s or ""))
+
 
 def extract_domain(url: str) -> str:
     if not url or not isinstance(url, str):
@@ -59,6 +77,7 @@ def extract_domain(url: str) -> str:
         return urlparse(url).netloc.lower()
     except Exception:
         return ""
+
 
 def make_markdown_table(rows: list[dict]) -> str:
     header = "| 순위 | 카테고리 | 사이트명 | URL | 연관성 | 한줄 근거 |\n|---:|---|---|---|---:|---|\n"
@@ -77,7 +96,10 @@ def make_markdown_table(rows: list[dict]) -> str:
         lines.append(line)
     return header + "\n".join(lines)
 
-# ── 데이터 로딩 & 병합 ───────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────
+# 데이터 로딩 & 병합
+# ─────────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_all_datasets(data_dir: str) -> pd.DataFrame:
     paths = []
@@ -95,7 +117,7 @@ def load_all_datasets(data_dir: str) -> pd.DataFrame:
         except Exception:
             continue
 
-        # 표준화
+        # 표준 컬럼 매핑
         colmap = {}
         url_col = find_url_column(df)
         if url_col:
@@ -114,6 +136,7 @@ def load_all_datasets(data_dir: str) -> pd.DataFrame:
         for c in ["카테고리", "사이트명", "URL", "간략메모"]:
             if c not in df2.columns:
                 df2[c] = ""
+
         dfs.append(df2[["카테고리", "사이트명", "URL", "간략메모"]])
 
     if not dfs:
@@ -124,29 +147,37 @@ def load_all_datasets(data_dir: str) -> pd.DataFrame:
         merged[c] = merged[c].fillna("").astype(str).str.strip()
     return merged
 
-# ✅ 세션 상태 초기화 (load_all_datasets ‘정의 후’ 여기에!)
+
+# ✅ 세션 상태 초기화 (load_all_datasets 정의 이후!)
 if "base_df" not in st.session_state:
     st.session_state["base_df"] = load_all_datasets(DATA_DIR)
 
-# ── 랭킹 로직 ────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────
+# 랭킹 로직
+# ─────────────────────────────────────────────────────────────
 def build_corpus(df: pd.DataFrame) -> tuple[list[str], list[str]]:
     text_cols = ["카테고리", "사이트명", "간략메모"]
     docs = [concat_fields(r, text_cols) for _, r in df.iterrows()]
     return docs, text_cols
 
+
 def direct_match_score(row: pd.Series, tokens: list[str]) -> float:
     text = (
-        normalize_text(row.get("카테고리", "")) + " " +
-        normalize_text(row.get("사이트명", "")) + " " +
-        normalize_text(row.get("간략메모", "")) + " " +
-        normalize_text(row.get("URL", ""))
+        normalize_text(row.get("카테고리", "")) + " "
+        + normalize_text(row.get("사이트명", "")) + " "
+        + normalize_text(row.get("간략메모", "")) + " "
+        + normalize_text(row.get("URL", ""))
     ).lower()
-    uniq = set([t for t in tokens if t])
+
+    uniq = set(t for t in tokens if t)
     hit = sum(1 for t in uniq if t in text)
     dom = extract_domain(row.get("URL", ""))
     dom_hit = sum(1 for t in uniq if t in dom)
+
     raw = hit + 1.5 * dom_hit
-    return 1 - math.exp(-0.4 * raw)
+    return 1 - math.exp(-0.4 * raw)  # 0~1 스케일
+
 
 def public_locale_boost(row: pd.Series, wants_public: bool, query_text: str) -> float:
     boost = 0.0
@@ -158,6 +189,7 @@ def public_locale_boost(row: pd.Series, wants_public: bool, query_text: str) -> 
     q = query_text.lower()
     hint_domestic = any(k in q for k in ["국내", "한국", "코리아", "korea"])
     hint_public = any(k in q for k in ["공공", "정부", "stat", "통계", "data"])
+
     if wants_public and is_go_kr:
         boost += 0.6
     elif wants_public and is_kr:
@@ -166,41 +198,55 @@ def public_locale_boost(row: pd.Series, wants_public: bool, query_text: str) -> 
         boost += 0.2
     if hint_public and (is_go_kr or "data.go.kr" in url.lower()):
         boost += 0.2
+
     return min(boost, 1.0)
+
 
 def brief_reason(row: pd.Series, tokens: list[str], sim: float, dm: float, pb: float) -> str:
     reasons = []
     cat = normalize_text(row.get("카테고리", ""))
     if cat:
         reasons.append(f"카테고리 '{cat}'")
-    hits = [t for t in tokens if t and (
-        t in normalize_text(row.get("사이트명","")).lower() or
-        t in normalize_text(row.get("간략메모","")).lower() or
-        t in normalize_text(row.get("URL","")).lower()
-    )]
+    hits = [
+        t for t in tokens if t and (
+            t in normalize_text(row.get("사이트명", "")).lower()
+            or t in normalize_text(row.get("간략메모", "")).lower()
+            or t in normalize_text(row.get("URL", "")).lower()
+        )
+    ]
     if hits:
         reasons.append(f"키워드 매칭({', '.join(sorted(set(hits))[:3])})")
-    dom = extract_domain(normalize_text(row.get("URL","")))
+    dom = extract_domain(normalize_text(row.get("URL", "")))
     if dom.endswith(".go.kr"):
         reasons.append("국내 공공 도메인")
     if not reasons:
         reasons.append("텍스트 유사도 상위")
     return " · ".join(reasons)[:80]
 
-def rank_results(df: pd.DataFrame, query_text: str, wants_public=True, selected_cats=None, topk=10) -> pd.DataFrame:
+
+def rank_results(
+    df: pd.DataFrame,
+    query_text: str,
+    wants_public: bool = True,
+    selected_cats: list[str] | None = None,
+    topk: int = 10,
+) -> pd.DataFrame:
     if df is None or df.empty:
-        return pd.DataFrame(columns=["순위","카테고리","사이트명","URL","연관성","한줄 근거"])
+        return pd.DataFrame(columns=["순위", "카테고리", "사이트명", "URL", "연관성", "한줄 근거"])
+
     if selected_cats:
         df = df[df["카테고리"].isin(selected_cats)].copy()
         if df.empty:
-            return pd.DataFrame(columns=["순위","카테고리","사이트명","URL","연관성","한줄 근거"])
+            return pd.DataFrame(columns=["순위", "카테고리", "사이트명", "URL", "연관성", "한줄 근거"])
 
+    # 1) 의미 유사도
     docs, _ = build_corpus(df)
     corpus = docs + [query_text]
-    tf = TfidfVectorizer(min_df=1, ngram_range=(1,2)).fit_transform(corpus)
+    tf = TfidfVectorizer(min_df=1, ngram_range=(1, 2)).fit_transform(corpus)
     sims = cosine_similarity(tf[:-1], tf[-1]).reshape(-1)
     sims = np.clip(sims, 0, 1)
 
+    # 2) 직매칭 / 3) 공공지표
     tokens = re.findall(r"[가-힣A-Za-z0-9]+", query_text.lower())
     direct_scores, public_boosts = [], []
     for _, row in df.iterrows():
@@ -209,7 +255,8 @@ def rank_results(df: pd.DataFrame, query_text: str, wants_public=True, selected_
     direct_scores = np.array(direct_scores)
     public_boosts = np.array(public_boosts)
 
-    final = 0.6*sims + 0.3*direct_scores + 0.1*np.minimum(1.0, public_boosts)
+    # 최종 점수
+    final = 0.6 * sims + 0.3 * direct_scores + 0.1 * np.minimum(1.0, public_boosts)
     final = np.clip(final, 0, 1)
 
     out = df.copy().reset_index(drop=True)
@@ -218,21 +265,129 @@ def rank_results(df: pd.DataFrame, query_text: str, wants_public=True, selected_
     out["_dm"] = direct_scores
     out["_pb"] = public_boosts
     out["_domain"] = out["URL"].apply(extract_domain).fillna("")
-    out = out.sort_values("연관성", ascending=False)
 
+    # 점수 정렬 → 도메인 중복 제거 → 상위 N
+    out = out.sort_values("연관성", ascending=False)
     dom = out["_domain"].fillna("").astype(str)
     site = out["사이트명"].fillna("").astype(str)
     group_key = np.where(dom.str.len() == 0, site, dom)
     out = out.groupby(group_key).head(1)
-
     out = out.sort_values("연관성", ascending=False).head(topk).copy()
 
+    # 한줄 근거
     reasons = []
     for _, row in out.iterrows():
         reasons.append(brief_reason(row, tokens, row["_sim"], row["_dm"], row["_pb"]))
     out["한줄 근거"] = reasons
 
-    out.insert(0, "순위", range(1, len(out)+1))
-   # 불필요 내부 컬럼 제거
-out = out.drop(columns=["_sim", "_dm", "_pb", "_domain"], errors="ignore")
+    # 표정리
+    out.insert(0, "순위", range(1, len(out) + 1))
+    out = out.drop(columns=["_sim", "_dm", "_pb", "_domain"], errors="ignore")
+    return out
 
+
+# ─────────────────────────────────────────────────────────────
+# 사이드바 (업로드/병합/옵션/안내 한 블록)
+# ─────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("검색 옵션")
+    query = st.text_input("질의(키워드)", value="국내 공공 데이터 소비 트렌드")
+    boost_public = st.toggle("국내 공공 도메인(.go.kr, .kr) 가중치", value=True)
+    topk = st.slider("Top N", min_value=5, max_value=50, value=DEFAULT_TOPK, step=1)
+
+    st.markdown("---")
+    st.caption("데이터 추가")
+    uploaded = st.file_uploader("CSV/XLSX 추가 업로드(선택)", type=["csv", "xlsx"])
+
+    # 업로드 즉시 병합 → 세션에 저장 → 옵션 새로고침
+    if uploaded is not None:
+        try:
+            if uploaded.name.lower().endswith(".csv"):
+                up_bytes = uploaded.read()
+                enc = chardet.detect(up_bytes).get("encoding") or "utf-8"
+                up_df = pd.read_csv(io.BytesIO(up_bytes), encoding=enc)
+            else:
+                up_df = pd.read_excel(uploaded)
+
+            url_col = find_url_column(up_df)
+            colmap = {}
+            if url_col:
+                colmap[url_col] = "URL"
+            for c in up_df.columns:
+                cl = c.strip().lower()
+                if cl in ["site", "sitename", "name", "사이트", "사이트명"]:
+                    colmap[c] = "사이트명"
+                if cl in ["category", "카테고리", "분류", "대분류"]:
+                    colmap[c] = "카테고리"
+                if cl in ["notes", "메모", "간략메모", "설명", "비고"]:
+                    colmap[c] = "간략메모"
+
+            up_df2 = up_df.rename(columns=colmap)
+            for c in ["카테고리", "사이트명", "URL", "간략메모"]:
+                if c not in up_df2.columns:
+                    up_df2[c] = ""
+            up_df2 = up_df2[["카테고리", "사이트명", "URL", "간략메모"]]
+
+            st.session_state["base_df"] = (
+                pd.concat([st.session_state["base_df"], up_df2], ignore_index=True)
+                .drop_duplicates()
+            )
+            st.success(f"추가 데이터 병합 완료! (총 {len(st.session_state['base_df'])}건)")
+            st.rerun()
+        except Exception as e:
+            st.error(f"업로드 처리 실패: {e}")
+
+    # 최신 세션 DF로 카테고리 옵션 생성
+    _cats = (
+        st.session_state["base_df"]["카테고리"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    sel_categories = sorted([c for c in _cats.unique() if c])
+    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[], key="cats")
+
+    st.markdown("---")
+    st.markdown("**연관성 점수 읽기**")
+    st.markdown(
+        "0.0 ~ 0.1 → 거의 무관  \n"
+        "0.1 ~ 0.2 → 약간 관련  \n"
+        "0.2 ~ 0.4 → 보통 관련  \n"
+        "0.4 ~     → 강하게 관련"
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# 본문: 검색 실행
+# ─────────────────────────────────────────────────────────────
+base_df = st.session_state["base_df"]
+
+if st.button("검색 실행", type="primary") or query:
+    if base_df.empty:
+        st.error("데이터가 비어 있습니다. data/ 폴더에 CSV/XLSX 파일을 넣거나 업로드하세요.")
+    else:
+        result_df = rank_results(
+            base_df.copy(),
+            query_text=query,
+            wants_public=boost_public,
+            selected_cats=selected_cats,
+            topk=topk,
+        )
+
+        if result_df.empty:
+            st.info("결과가 없습니다. 키워드를 더 구체화하거나 카테고리 필터를 해제하세요.")
+        else:
+            rows = result_df[
+                ["순위", "카테고리", "사이트명", "URL", "연관성", "한줄 근거"]
+            ].to_dict(orient="records")
+            md_table = make_markdown_table(rows)
+
+            st.markdown("### 연관 자료 소스")
+            st.markdown(md_table, unsafe_allow_html=False)
+
+            st.download_button(
+                label="결과 CSV 다운로드",
+                data=result_df.to_csv(index=False).encode("utf-8-sig"),
+                file_name="sourcefinder_results.csv",
+                mime="text/csv",
+            )
