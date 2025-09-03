@@ -285,10 +285,12 @@ def rank_results(
     out = out.drop(columns=["_sim", "_dm", "_pb", "_domain"], errors="ignore")
     return out
 
+# ─────────────────────────────────────────────
+# 사이드바 + 업로드 처리 + 카테고리 옵션 (드롭-인)
+# ─────────────────────────────────────────────
+import hashlib  # 파일 변경 감지용
 
-# ─────────────────────────────────────────────────────────────
-# 사이드바 (업로드/병합/옵션/안내 한 블록)
-# ─────────────────────────────────────────────────────────────
+# 1) 사이드바(검색 옵션 + 업로드 위젯)
 with st.sidebar:
     st.header("검색 옵션")
     query = st.text_input("질의(키워드)", value="국내 공공 데이터 소비 트렌드")
@@ -297,77 +299,63 @@ with st.sidebar:
 
     st.markdown("---")
     st.caption("데이터 추가")
-
-    # 업로드 트리거 콜백
-    def _on_upload():
-        st.session_state["upload_triggered"] = True
-
-    # key를 반드시 지정 (위젯 상태를 세션에서 제어하기 위함)
+    # NOTE: key="uploader" 로 위젯 상태는 세션에 저장되지만,
+    # 값 초기화를 강제로 건드리지 않습니다(무한 루프/예외 방지).
     uploaded = st.file_uploader(
         "CSV/XLSX 추가 업로드(선택)",
         type=["csv", "xlsx"],
         key="uploader",
-        on_change=_on_upload
     )
 
-# 업로드 처리: 트리거가 켜졌을 때 한 번만 수행
-if st.session_state.get("upload_triggered") and st.session_state.get("uploader") is not None:
+# 2) 업로드 처리(사이드바 밖에서 실행) — '파일이 바뀐 경우에만' 병합
+if uploaded is not None:
     try:
-        file = st.session_state["uploader"]
-        # 파일 내용을 Bytes로 안전히 가져오기 (rerun에도 안전)
-        up_bytes = file.getvalue()
+        # bytes 로 읽고 해시로 변경 감지(같은 파일 재실행 방지)
+        up_bytes = uploaded.getvalue()
+        fhash = hashlib.md5(up_bytes).hexdigest()
+        if st.session_state.get("last_upload_hash") != fhash:
+            # CSV/XLSX 판별 및 로드
+            if uploaded.name.lower().endswith(".csv"):
+                enc = chardet.detect(up_bytes).get("encoding") or "utf-8"
+                up_df = pd.read_csv(io.BytesIO(up_bytes), encoding=enc)
+            else:
+                up_df = pd.read_excel(io.BytesIO(up_bytes))
 
-        # 판별 및 로딩
-        if file.name.lower().endswith(".csv"):
-            enc = chardet.detect(up_bytes).get("encoding") or "utf-8"
-            up_df = pd.read_csv(io.BytesIO(up_bytes), encoding=enc)
-        else:
-            up_df = pd.read_excel(io.BytesIO(up_bytes))
+            # 표준 컬럼 매핑
+            url_col = find_url_column(up_df)
+            colmap = {}
+            if url_col:
+                colmap[url_col] = "URL"
+            for c in up_df.columns:
+                cl = c.strip().lower()
+                if cl in ["site", "sitename", "name", "사이트", "사이트명"]:
+                    colmap[c] = "사이트명"
+                if cl in ["category", "카테고리", "분류", "대분류"]:
+                    colmap[c] = "카테고리"
+                if cl in ["notes", "메모", "간략메모", "설명", "비고"]:
+                    colmap[c] = "간략메모"
 
-        # 표준 컬럼 매핑
-        url_col = find_url_column(up_df)
-        colmap = {}
-        if url_col:
-            colmap[url_col] = "URL"
-        for c in up_df.columns:
-            cl = c.strip().lower()
-            if cl in ["site", "sitename", "name", "사이트", "사이트명"]:
-                colmap[c] = "사이트명"
-            if cl in ["category", "카테고리", "분류", "대분류"]:
-                colmap[c] = "카테고리"
-            if cl in ["notes", "메모", "간략메모", "설명", "비고"]:
-                colmap[c] = "간략메모"
+            up_df2 = up_df.rename(columns=colmap)
+            for c in ["카테고리", "사이트명", "URL", "간략메모"]:
+                if c not in up_df2.columns:
+                    up_df2[c] = ""
+            up_df2 = up_df2[["카테고리", "사이트명", "URL", "간략메모"]]
 
-        up_df2 = up_df.rename(columns=colmap)
-        for c in ["카테고리", "사이트명", "URL", "간략메모"]:
-            if c not in up_df2.columns:
-                up_df2[c] = ""
-        up_df2 = up_df2[["카테고리", "사이트명", "URL", "간략메모"]]
-
-        # 병합 → 세션 저장
-        st.session_state["base_df"] = (
-            pd.concat([st.session_state["base_df"], up_df2], ignore_index=True)
-            .drop_duplicates()
-        )
-
-        # ✅ 루프 방지: 트리거/위젯 초기화 (rerun 호출 불필요)
-        st.session_state["upload_triggered"] = False
-        st.session_state["uploader"] = None
-
-        st.success(f"추가 데이터 병합 완료! (총 {len(st.session_state['base_df'])}건)")
-
+            # 병합 → 세션 저장
+            st.session_state["base_df"] = (
+                pd.concat([st.session_state["base_df"], up_df2], ignore_index=True)
+                .drop_duplicates()
+            )
+            st.session_state["last_upload_hash"] = fhash
+            st.success(f"추가 데이터 병합 완료! (총 {len(st.session_state['base_df'])}건)")
     except Exception as e:
-        st.session_state["upload_triggered"] = False
-        st.session_state["uploader"] = None
         st.error(f"업로드 처리 실패: {e}")
 
-
-    # 최신 세션 DF로 카테고리 옵션 생성
+# 3) 카테고리 옵션(최신 세션 DF 기준으로 항상 생성)
+with st.sidebar:
     _cats = (
         st.session_state["base_df"]["카테고리"]
-        .dropna()
-        .astype(str)
-        .str.strip()
+        .dropna().astype(str).str.strip()
     )
     sel_categories = sorted([c for c in _cats.unique() if c])
     selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[], key="cats")
