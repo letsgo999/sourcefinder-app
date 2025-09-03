@@ -299,66 +299,73 @@ def brief_reason(row: pd.Series, tokens: list[str], sim: float, dm: float, pb: f
     return txt[:80]
 
 def rank_results(df: pd.DataFrame, query_text: str, wants_public=True, selected_cats=None, topk=10) -> pd.DataFrame:
+    # 빈 데이터 가드
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["순위", "카테고리", "사이트명", "URL", "연관성", "한줄 근거"])
+
+    # 카테고리 필터
     if selected_cats:
         df = df[df["카테고리"].isin(selected_cats)].copy()
+        if df.empty:
+            return pd.DataFrame(columns=["순위", "카테고리", "사이트명", "URL", "연관성", "한줄 근거"])
 
     # 1) 의미 유사도 (TF-IDF)
-    docs, text_cols = build_corpus(df)
+    docs, _ = build_corpus(df)
     corpus = docs + [query_text]
-    vectorizer = TfidfVectorizer(min_df=1, ngram_range=(1,2))
+    vectorizer = TfidfVectorizer(min_df=1, ngram_range=(1, 2))
     tf = vectorizer.fit_transform(corpus)
-    sims = cosine_similarity(tf[:-1], tf[-1])
+    sims = cosine_similarity(tf[:-1], tf[-1]).reshape(-1)
+    sims = np.clip(sims, 0, 1)
 
     # 2) 키워드/도메인 직매칭
-    # 한글/영문/숫자 단어 기준 토큰화(간단)
     tokens = re.findall(r"[가-힣A-Za-z0-9]+", query_text.lower())
-
-    sim_scores = sims.reshape(-1)
-    direct_scores = []
-    public_boosts = []
-
-    for i, (_, row) in enumerate(df.iterrows()):
+    direct_scores, public_boosts = [], []
+    for _, row in df.iterrows():
         dm = direct_match_score(row, tokens)
         pb = public_locale_boost(row, wants_public, query_text)
         direct_scores.append(dm)
         public_boosts.append(pb)
-
-    sim_scores = np.clip(sim_scores, 0, 1)
     direct_scores = np.array(direct_scores)
     public_boosts = np.array(public_boosts)
 
-    # 최종 점수: 0~1
-    final = 0.6*sim_scores + 0.3*direct_scores + 0.1*np.minimum(1.0, public_boosts)
-    # 0~1 보장
+    # 3) 최종 점수
+    final = 0.6 * sims + 0.3 * direct_scores + 0.1 * np.minimum(1.0, public_boosts)
     final = np.clip(final, 0, 1)
 
     out = df.copy().reset_index(drop=True)
     out["연관성"] = final
-    out["_sim"] = sim_scores
+    out["_sim"] = sims
     out["_dm"] = direct_scores
     out["_pb"] = public_boosts
 
-    # 중복 도메인 1회만 노출(최고 점수 유지)
-dom = out["_domain"].fillna("").astype(str)
-site = out["사이트명"].fillna("").astype(str)
-group_key = np.where(dom.str.len() == 0, site, dom)
-out = out.groupby(group_key).head(1)
+    # 도메인 추출
+    out["_domain"] = out["URL"].apply(extract_domain).fillna("")
+
+    # 점수 내림차순 정렬
+    out = out.sort_values("연관성", ascending=False)
+
+    # ✅ URL 없으면 사이트명으로 그룹화 (탭/스페이스 혼용 금지!)
+    dom = out["_domain"].fillna("").astype(str)
+    site = out["사이트명"].fillna("").astype(str)
+    group_key = np.where(dom.str.len() == 0, site, dom)
+    out = out.groupby(group_key).head(1)
 
     # 상위 N
     out = out.sort_values("연관성", ascending=False).head(topk).copy()
 
-    # 한줄 근거 생성
+    # 한줄 근거
     reasons = []
-    for i, row in out.iterrows():
+    for _, row in out.iterrows():
         reasons.append(brief_reason(row, tokens, row["_sim"], row["_dm"], row["_pb"]))
     out["한줄 근거"] = reasons
 
-    # 표시용 순위
-    out.insert(0, "순위", range(1, len(out)+1))
+    # 순위 컬럼 + 내부 컬럼 정리
+    out.insert(0, "순위", range(1, len(out) + 1))
+    out = out.drop(columns=["_sim", "_dm", "_pb", "_domain"], errors="ignore")
 
-    # 불필요 내부 컬럼 제거
-    out = out.drop(columns=["_sim","_dm","_pb","_domain"], errors="ignore")
-    return out
+    # 출력 스키마 보장
+    cols = ["순위", "카테고리", "사이트명", "URL", "연관성", "한줄 근거"]
+    return out[cols]
 
 # ─────────────────────────────────────────
 # 4) 결과 랭킹 & 표시
