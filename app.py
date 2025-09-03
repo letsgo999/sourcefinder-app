@@ -7,6 +7,8 @@ import glob
 import math
 import hashlib
 from urllib.parse import urlparse
+import os
+import requests
 
 import streamlit as st
 import pandas as pd
@@ -30,6 +32,11 @@ st.caption(
 
 DATA_DIR = "data"
 DEFAULT_TOPK = 10
+
+# GitHub 원격 기본 설정 (Streamlit Cloud에서 .git이 없을 수도 있으므로 상수/secret 기반)
+DEFAULT_REPO_OWNER = st.secrets.get("REPO_OWNER", "letsgo999")
+DEFAULT_REPO_NAME = st.secrets.get("REPO_NAME", "sourcefinder-app")
+DEFAULT_REPO_BRANCH = st.secrets.get("REPO_BRANCH", "main")
 
 
 # ─────────────────────────────────────────────────────────
@@ -99,15 +106,34 @@ def make_markdown_table(rows: list[dict]) -> str:
 
 
 # ─────────────────────────────────────────────────────────
-# 데이터 로딩 & 병합 (레포의 data/ 고정)
+# 데이터 로딩 & 병합 (로컬 data/ → 비었으면 GitHub 원격 data/)
 # ─────────────────────────────────────────────────────────
-@st.cache_data(show_spinner=False)
-def load_all_datasets(data_dir: str) -> pd.DataFrame:
+
+def _standardize_df(df: pd.DataFrame) -> pd.DataFrame:
+    colmap = {}
+    url_col = find_url_column(df)
+    if url_col:
+        colmap[url_col] = "URL"
+    for c in df.columns:
+        cl = str(c).strip().lower()
+        if cl in ["site", "sitename", "name", "사이트", "사이트명"]:
+            colmap[c] = "사이트명"
+        if cl in ["category", "카테고리", "분류", "대분류"]:
+            colmap[c] = "카테고리"
+        if cl in ["notes", "메모", "간략메모", "설명", "비고"]:
+            colmap[c] = "간략메모"
+    df2 = df.rename(columns=colmap)
+    for col in ["카테고리", "사이트명", "URL", "간략메모"]:
+        if col not in df2.columns:
+            df2[col] = ""
+    return df2[["카테고리", "사이트명", "URL", "간략메모"]]
+
+
+def _read_local_files(data_dir: str) -> list[pd.DataFrame]:
     paths = []
     paths += glob.glob(f"{data_dir}/**/*.csv", recursive=True)
     paths += glob.glob(f"{data_dir}/**/*.xlsx", recursive=True)
-    dfs = []
-
+    dfs: list[pd.DataFrame] = []
     for p in paths:
         try:
             if p.lower().endswith(".csv"):
@@ -115,30 +141,72 @@ def load_all_datasets(data_dir: str) -> pd.DataFrame:
                 df = pd.read_csv(p, encoding=enc)
             else:
                 df = pd.read_excel(p)
+            dfs.append(_standardize_df(df))
         except Exception:
             continue
+    return dfs
 
-        # 표준 컬럼 매핑
-        colmap = {}
-        url_col = find_url_column(df)
-        if url_col:
-            colmap[url_col] = "URL"
 
-        for c in df.columns:
-            cl = str(c).strip().lower()
-            if cl in ["site", "sitename", "name", "사이트", "사이트명"]:
-                colmap[c] = "사이트명"
-            if cl in ["category", "카테고리", "분류", "대분류"]:
-                colmap[c] = "카테고리"
-            if cl in ["notes", "메모", "간략메모", "설명", "비고"]:
-                colmap[c] = "간략메모"
+def _list_github_data_files(owner: str, repo: str, branch: str, subdir: str = "data") -> list[dict]:
+    base = f"https://api.github.com/repos/{owner}/{repo}/contents/{subdir}?ref={branch}"
+    stack = [base]
+    files: list[dict] = []
+    while stack:
+        url = stack.pop()
+        try:
+            r = requests.get(url, timeout=10)
+            if r.status_code != 200:
+                continue
+            items = r.json()
+            if not isinstance(items, list):
+                continue
+            for it in items:
+                if it.get("type") == "file":
+                    name = it.get("name", "").lower()
+                    if name.endswith(".csv") or name.endswith(".xlsx"):
+                        files.append({"download_url": it.get("download_url"), "name": it.get("name")})
+                elif it.get("type") == "dir":
+                    stack.append(it.get("url"))
+        except Exception:
+            continue
+    return files
 
-        df2 = df.rename(columns=colmap)
-        for col in ["카테고리", "사이트명", "URL", "간략메모"]:
-            if col not in df2.columns:
-                df2[col] = ""
 
-        dfs.append(df2[["카테고리", "사이트명", "URL", "간략메모"]])
+def _read_remote_files(file_meta: list[dict]) -> list[pd.DataFrame]:
+    dfs: list[pd.DataFrame] = []
+    for it in file_meta:
+        url = it.get("download_url")
+        if not url:
+            continue
+        try:
+            r = requests.get(url, timeout=20)
+            if r.status_code != 200:
+                continue
+            data = r.content
+            if it.get("name", "").lower().endswith(".csv"):
+                enc = chardet.detect(data).get("encoding") or "utf-8"
+                df = pd.read_csv(io.BytesIO(data), encoding=enc)
+            else:
+                df = pd.read_excel(io.BytesIO(data))
+            dfs.append(_standardize_df(df))
+        except Exception:
+            continue
+    return dfs
+
+
+@st.cache_data(show_spinner=False)
+def load_all_datasets(data_dir: str,
+                      owner: str = DEFAULT_REPO_OWNER,
+                      repo: str = DEFAULT_REPO_NAME,
+                      branch: str = DEFAULT_REPO_BRANCH) -> pd.DataFrame:
+    # 1) 로컬 data/ 우선
+    dfs = _read_local_files(data_dir)
+
+    # 2) 비어 있으면 GitHub 원격 data/에서 끌어오기
+    if not dfs:
+        rem_files = _list_github_data_files(owner, repo, branch, subdir=data_dir)
+        if rem_files:
+            dfs = _read_remote_files(rem_files)
 
     if not dfs:
         return pd.DataFrame(columns=["카테고리", "사이트명", "URL", "간략메모"])
@@ -152,6 +220,8 @@ def load_all_datasets(data_dir: str) -> pd.DataFrame:
 # ✅ 세션 초기화: 레포의 data/만 불러와 고정(누구나 새로고침해도 동일 시작점)
 if "base_df" not in st.session_state:
     st.session_state["base_df"] = load_all_datasets(DATA_DIR)
+    if st.session_state["base_df"].empty:
+        st.info("기본 data/ 폴더에서 데이터를 찾지 못해 GitHub 원격을 확인했습니다. 원격에도 없으면 업로드해서 사용하세요.")
 
 # (선택) 업로드 해시 초기화
 if "last_upload_hash" not in st.session_state:
@@ -307,6 +377,7 @@ with st.sidebar:
         type=["csv", "xlsx"],
         key="uploader",
     )
+    st.caption("기본 데이터는 항상 깃허브 저장소의 data/ 폴더를 사용합니다.")
 
 # ─────────────────────────────────────────────────────────
 # 업로드 처리(세션 한정 병합, 무한루프 방지)
@@ -377,7 +448,7 @@ with st.sidebar:
 base_df = st.session_state["base_df"]
 
 if base_df.empty:
-    st.warning("레포의 `data/` 폴더에 기본 CSV/XLSX를 커밋해 두면 새로고침/다른 사용자도 항상 그 데이터를 사용합니다.")
+    st.warning("레포와 원격의 `data/`에서 CSV/XLSX를 찾지 못했습니다. 데이터 파일을 커밋하거나 파일을 업로드하세요.")
 else:
     if st.button("검색 실행", type="primary") or True:
         result_df = rank_results(
