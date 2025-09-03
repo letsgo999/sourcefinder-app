@@ -181,11 +181,28 @@ with st.sidebar:
     st.header("검색 옵션")
     query = st.text_input("질의(키워드)", value="국내 공공 데이터 소비 트렌드")
     boost_public = st.toggle("국내 공공 도메인(.go.kr, .kr) 가중치", value=True)
-    topk = st.slider("Top N", min_value=5, max_value=50, value=DEFAULT_TOPK, step=1)
+    topk = st.slider("Top N", 5, 50, 10, 1)
 
     st.markdown("---")
     st.caption("데이터 추가")
     uploaded = st.file_uploader("CSV/XLSX 추가 업로드(선택)", type=["csv", "xlsx"])
+
+    # 카테고리 옵션 (단 1회!)
+    sel_categories = sorted([c for c in base_df["카테고리"].unique() if c])
+    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[])
+
+    # 안내문 추가
+    st.markdown("---")
+    st.markdown("**연관성 점수 읽기**")
+    st.markdown(
+        """
+0.0 ~ 0.1 → 거의 무관  
+0.1 ~ 0.2 → 약간 관련  
+0.2 ~ 0.4 → 보통 관련  
+0.4 ~     → 강하게 관련
+        """
+    )
+
 
 # 2) 업로드 데이터 병합(있으면)
 if uploaded:
@@ -220,26 +237,6 @@ if uploaded:
         st.success(f"추가 데이터 병합 완료! (총 {len(base_df)}건)")
     except Exception as e:
         st.error(f"업로드 처리 실패: {e}")
-
-# 3) 병합 이후에 카테고리 옵션 생성 (👉 여기서 생성!)
-with st.sidebar:
-    sel_categories = sorted([c for c in base_df["카테고리"].unique() if c])
-    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[])
-with st.sidebar:
-    sel_categories = sorted([c for c in base_df["카테고리"].unique() if c])
-    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[])
-
-    # ← 여기서도 반드시 같은 레벨(스페이스 4칸)
-    st.markdown("---")
-    st.markdown("**연관성 점수 읽기**")
-    st.markdown(
-        """
-0.0 ~ 0.1 → 거의 무관  
-0.1 ~ 0.2 → 약간 관련  
-0.2 ~ 0.4 → 보통 관련  
-0.4 ~     → 강하게 관련
-        """
-    )
 
 ############################
 # 랭킹 로직
