@@ -174,15 +174,12 @@ def load_all_datasets(data_dir: str) -> pd.DataFrame:
 
 base_df = load_all_datasets(DATA_DIR)
 
-############################
-# 사이드바 옵션
-############################
+# ─────────────────────────────────────────
+# 1) 사이드바 1차 구성: 질의/가중치/TopN + 파일 업로더
+# ─────────────────────────────────────────
 with st.sidebar:
     st.header("검색 옵션")
     query = st.text_input("질의(키워드)", value="국내 공공 데이터 소비 트렌드")
-    sel_categories = sorted([c for c in base_df["카테고리"].unique() if c])
-    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[])
-
     boost_public = st.toggle("국내 공공 도메인(.go.kr, .kr) 가중치", value=True)
     topk = st.slider("Top N", min_value=5, max_value=50, value=DEFAULT_TOPK, step=1)
 
@@ -190,9 +187,7 @@ with st.sidebar:
     st.caption("데이터 추가")
     uploaded = st.file_uploader("CSV/XLSX 추가 업로드(선택)", type=["csv", "xlsx"])
 
-############################
-# 업로드 데이터 병합
-############################
+# 2) 업로드 데이터 병합(있으면)
 if uploaded:
     try:
         if uploaded.name.lower().endswith(".csv"):
@@ -206,7 +201,6 @@ if uploaded:
         colmap = {}
         if url_col:
             colmap[url_col] = "URL"
-        # 추정 매핑
         for c in up_df.columns:
             cl = c.strip().lower()
             if cl in ["site", "sitename", "name", "사이트", "사이트명"]:
@@ -226,6 +220,11 @@ if uploaded:
         st.success(f"추가 데이터 병합 완료! (총 {len(base_df)}건)")
     except Exception as e:
         st.error(f"업로드 처리 실패: {e}")
+
+# 3) 병합 이후에 카테고리 옵션 생성 (👉 여기서 생성!)
+with st.sidebar:
+    sel_categories = sorted([c for c in base_df["카테고리"].unique() if c])
+    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[])
 
 ############################
 # 랭킹 로직
@@ -340,9 +339,10 @@ def rank_results(df: pd.DataFrame, query_text: str, wants_public=True, selected_
     out["_pb"] = public_boosts
 
     # 중복 도메인 1회만 노출(최고 점수 유지)
-    out["_domain"] = out["URL"].apply(extract_domain)
-    out = out.sort_values("연관성", ascending=False)
-    out = out.groupby(out["_domain"].replace("", out["사이트명"])).head(1)  # URL 없으면 사이트명으로 그룹화
+dom = out["_domain"].fillna("").astype(str)
+site = out["사이트명"].fillna("").astype(str)
+group_key = np.where(dom.str.len() == 0, site, dom)
+out = out.groupby(group_key).head(1)
 
     # 상위 N
     out = out.sort_values("연관성", ascending=False).head(topk).copy()
@@ -360,9 +360,9 @@ def rank_results(df: pd.DataFrame, query_text: str, wants_public=True, selected_
     out = out.drop(columns=["_sim","_dm","_pb","_domain"], errors="ignore")
     return out
 
-############################
-# 실행
-############################
+# ─────────────────────────────────────────
+# 4) 결과 랭킹 & 표시
+# ─────────────────────────────────────────
 if st.button("검색 실행", type="primary") or query:
     if base_df.empty:
         st.error("데이터가 비어 있습니다. data/ 폴더에 CSV/XLSX 파일을 넣거나 상단에서 업로드하세요.")
@@ -375,20 +375,16 @@ if st.button("검색 실행", type="primary") or query:
             topk=topk
         )
 
-        # 표시: '사이트명'을 클릭 가능한 링크로 제공하는 마크다운 테이블
-        rows = result_df[["순위","카테고리","사이트명","URL","연관성","한줄 근거"]].to_dict(orient="records")
-        md_table = make_markdown_table(rows)
-        st.markdown("### 연관 자료 소스")
-        st.markdown(md_table, unsafe_allow_html=False)
+        if result_df.empty:
+            st.info("결과가 없습니다. 키워드를 더 구체화하거나 카테고리 필터를 해제하세요.")
+        else:
+            rows = result_df[["순위","카테고리","사이트명","URL","연관성","한줄 근거"]].to_dict(orient="records")
+            md_table = make_markdown_table(rows)
+            st.markdown("### 연관 자료 소스")
+            st.markdown(md_table)
 
-        # 다운로드
-        csv_bytes = result_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label="결과 CSV 다운로드",
-            data=csv_bytes,
-            file_name="sourcefinder_results.csv",
-            mime="text/csv"
-        )
+            csv_bytes = result_df.to_csv(index=False).encode("utf-8-sig")
+            st.download_button("결과 CSV 다운로드", csv_bytes, "sourcefinder_results.csv", "text/csv")
 
         # 추가 탐색 팁 (3줄 이내)
         st.markdown("—")
