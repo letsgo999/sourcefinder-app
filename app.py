@@ -5,6 +5,7 @@ import re
 import io
 import glob
 import math
+import hashlib
 from urllib.parse import urlparse
 
 import streamlit as st
@@ -16,9 +17,9 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # 기본 세팅
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 st.set_page_config(page_title="자료 소스 탐색기 GPT (SourceFinder)", layout="wide")
 
 st.title("자료 소스 탐색기 GPT (SourceFinder)")
@@ -31,9 +32,9 @@ DATA_DIR = "data"
 DEFAULT_TOPK = 10
 
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # 유틸 함수
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 def detect_encoding(path: str) -> str:
     with open(path, "rb") as f:
         raw = f.read()
@@ -97,9 +98,9 @@ def make_markdown_table(rows: list[dict]) -> str:
     return header + "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────
-# 데이터 로딩 & 병합
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
+# 데이터 로딩 & 병합 (레포의 data/ 고정)
+# ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False)
 def load_all_datasets(data_dir: str) -> pd.DataFrame:
     paths = []
@@ -133,9 +134,9 @@ def load_all_datasets(data_dir: str) -> pd.DataFrame:
                 colmap[c] = "간략메모"
 
         df2 = df.rename(columns=colmap)
-        for c in ["카테고리", "사이트명", "URL", "간략메모"]:
-            if c not in df2.columns:
-                df2[c] = ""
+        for col in ["카테고리", "사이트명", "URL", "간략메모"]:
+            if col not in df2.columns:
+                df2[col] = ""
 
         dfs.append(df2[["카테고리", "사이트명", "URL", "간략메모"]])
 
@@ -143,19 +144,23 @@ def load_all_datasets(data_dir: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["카테고리", "사이트명", "URL", "간략메모"])
 
     merged = pd.concat(dfs, ignore_index=True).drop_duplicates()
-    for c in ["카테고리", "사이트명", "URL", "간략메모"]:
-        merged[c] = merged[c].fillna("").astype(str).str.strip()
+    for col in ["카테고리", "사이트명", "URL", "간략메모"]:
+        merged[col] = merged[col].fillna("").astype(str).str.strip()
     return merged
 
 
-# ✅ 세션 상태 초기화 (load_all_datasets 정의 이후!)
+# ✅ 세션 초기화: 레포의 data/만 불러와 고정(누구나 새로고침해도 동일 시작점)
 if "base_df" not in st.session_state:
     st.session_state["base_df"] = load_all_datasets(DATA_DIR)
 
+# (선택) 업로드 해시 초기화
+if "last_upload_hash" not in st.session_state:
+    st.session_state["last_upload_hash"] = None
 
-# ─────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────
 # 랭킹 로직
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 def build_corpus(df: pd.DataFrame) -> tuple[list[str], list[str]]:
     text_cols = ["카테고리", "사이트명", "간략메모"]
     docs = [concat_fields(r, text_cols) for _, r in df.iterrows()]
@@ -285,12 +290,10 @@ def rank_results(
     out = out.drop(columns=["_sim", "_dm", "_pb", "_domain"], errors="ignore")
     return out
 
-# ─────────────────────────────────────────────
-# 사이드바 + 업로드 처리 + 카테고리 옵션 (드롭-인)
-# ─────────────────────────────────────────────
-import hashlib  # 파일 변경 감지용
 
-# 1) 사이드바(검색 옵션 + 업로드 위젯)
+# ─────────────────────────────────────────────────────────
+# 사이드바 (검색 옵션 + 업로드 위젯)
+# ─────────────────────────────────────────────────────────
 with st.sidebar:
     st.header("검색 옵션")
     query = st.text_input("질의(키워드)", value="국내 공공 데이터 소비 트렌드")
@@ -298,30 +301,27 @@ with st.sidebar:
     topk = st.slider("Top N", min_value=5, max_value=50, value=DEFAULT_TOPK, step=1)
 
     st.markdown("---")
-    st.caption("데이터 추가")
-    # NOTE: key="uploader" 로 위젯 상태는 세션에 저장되지만,
-    # 값 초기화를 강제로 건드리지 않습니다(무한 루프/예외 방지).
+    st.caption("데이터 추가 (업로드는 현재 세션에만 적용됩니다)")
     uploaded = st.file_uploader(
         "CSV/XLSX 추가 업로드(선택)",
         type=["csv", "xlsx"],
         key="uploader",
     )
 
-# 2) 업로드 처리(사이드바 밖에서 실행) — '파일이 바뀐 경우에만' 병합
+# ─────────────────────────────────────────────────────────
+# 업로드 처리(세션 한정 병합, 무한루프 방지)
+# ─────────────────────────────────────────────────────────
 if uploaded is not None:
     try:
-        # bytes 로 읽고 해시로 변경 감지(같은 파일 재실행 방지)
         up_bytes = uploaded.getvalue()
         fhash = hashlib.md5(up_bytes).hexdigest()
         if st.session_state.get("last_upload_hash") != fhash:
-            # CSV/XLSX 판별 및 로드
             if uploaded.name.lower().endswith(".csv"):
                 enc = chardet.detect(up_bytes).get("encoding") or "utf-8"
                 up_df = pd.read_csv(io.BytesIO(up_bytes), encoding=enc)
             else:
                 up_df = pd.read_excel(io.BytesIO(up_bytes))
 
-            # 표준 컬럼 매핑
             url_col = find_url_column(up_df)
             colmap = {}
             if url_col:
@@ -336,26 +336,27 @@ if uploaded is not None:
                     colmap[c] = "간략메모"
 
             up_df2 = up_df.rename(columns=colmap)
-            for c in ["카테고리", "사이트명", "URL", "간략메모"]:
-                if c not in up_df2.columns:
-                    up_df2[c] = ""
+            for col in ["카테고리", "사이트명", "URL", "간략메모"]:
+                if col not in up_df2.columns:
+                    up_df2[col] = ""
             up_df2 = up_df2[["카테고리", "사이트명", "URL", "간략메모"]]
 
-            # 병합 → 세션 저장
             st.session_state["base_df"] = (
                 pd.concat([st.session_state["base_df"], up_df2], ignore_index=True)
                 .drop_duplicates()
             )
             st.session_state["last_upload_hash"] = fhash
-            st.success(f"추가 데이터 병합 완료! (총 {len(st.session_state['base_df'])}건)")
+            st.success(f"추가 데이터 병합 완료! (현재 세션 기준 총 {len(st.session_state['base_df'])}건)")
     except Exception as e:
         st.error(f"업로드 처리 실패: {e}")
 
-# 3) 카테고리 옵션(최신 세션 DF 기준으로 항상 생성)
+# ─────────────────────────────────────────────────────────
+# 카테고리 옵션 (항상 최신 세션 DF 기준)
+# ─────────────────────────────────────────────────────────
 with st.sidebar:
     _cats = (
-        st.session_state["base_df"]["카테고리"]
-        .dropna().astype(str).str.strip()
+        st.session_state["base_df"]["카테고리"].dropna().astype(str).str.strip()
+        if not st.session_state["base_df"].empty else pd.Series([], dtype=str)
     )
     sel_categories = sorted([c for c in _cats.unique() if c])
     selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[], key="cats")
@@ -370,15 +371,15 @@ with st.sidebar:
     )
 
 
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 # 본문: 검색 실행
-# ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────
 base_df = st.session_state["base_df"]
 
-if st.button("검색 실행", type="primary") or query:
-    if base_df.empty:
-        st.error("데이터가 비어 있습니다. data/ 폴더에 CSV/XLSX 파일을 넣거나 업로드하세요.")
-    else:
+if base_df.empty:
+    st.warning("레포의 `data/` 폴더에 기본 CSV/XLSX를 커밋해 두면 새로고침/다른 사용자도 항상 그 데이터를 사용합니다.")
+else:
+    if st.button("검색 실행", type="primary") or True:
         result_df = rank_results(
             base_df.copy(),
             query_text=query,
