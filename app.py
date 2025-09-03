@@ -225,6 +225,21 @@ if uploaded:
 with st.sidebar:
     sel_categories = sorted([c for c in base_df["카테고리"].unique() if c])
     selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[])
+with st.sidebar:
+    sel_categories = sorted([c for c in base_df["카테고리"].unique() if c])
+    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[])
+
+    # ← 여기서도 반드시 같은 레벨(스페이스 4칸)
+    st.markdown("---")
+    st.markdown("**연관성 점수 읽기**")
+    st.markdown(
+        """
+0.0 ~ 0.1 → 거의 무관  
+0.1 ~ 0.2 → 약간 관련  
+0.2 ~ 0.4 → 보통 관련  
+0.4 ~     → 강하게 관련
+        """
+    )
 
 ############################
 # 랭킹 로직
