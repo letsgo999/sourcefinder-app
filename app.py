@@ -380,7 +380,7 @@ with st.sidebar:
         type=["csv", "xlsx"],
         key="uploader",
     )
-    st.caption("기본 데이터는 항상 깃허브 저장소의 data/ 폴더를 사용합니다.")
+    st.caption(f"기본 데이터는 깃허브 {DEFAULT_REPO_OWNER}/{DEFAULT_REPO_NAME}@{DEFAULT_REPO_BRANCH} 의 data/ 폴더를 사용합니다.")
 
 # ─────────────────────────────────────────────────────────
 # 업로드 처리(세션 한정 병합, 무한루프 방지)
