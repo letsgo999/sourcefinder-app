@@ -233,4 +233,6 @@ def rank_results(df: pd.DataFrame, query_text: str, wants_public=True, selected_
     out["한줄 근거"] = reasons
 
     out.insert(0, "순위", range(1, len(out)+1))
-    out = out.drop(columns=["_sim","_
+   # 불필요 내부 컬럼 제거
+out = out.drop(columns=["_sim", "_dm", "_pb", "_domain"], errors="ignore")
+
