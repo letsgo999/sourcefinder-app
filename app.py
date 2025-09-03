@@ -30,8 +30,15 @@ st.caption(
     "(1) 의미 유사도 (2) 키워드/도메인 직매칭 (3) 국내/공공 가중치"
 )
 
-DATA_DIR = "data"
+# 기존
+# DATA_DIR = "data"
+
+# 교체
+from pathlib import Path
+APP_DIR = Path(__file__).parent.resolve()
+DATA_DIR = (APP_DIR / "data").resolve()  # 절대경로로 고정
 DEFAULT_TOPK = 10
+
 
 # GitHub 원격 기본 설정 (Streamlit Cloud에서 .git이 없을 수도 있으므로 상수/secret 기반)
 DEFAULT_REPO_OWNER = st.secrets.get("REPO_OWNER", "letsgo999")
@@ -198,18 +205,47 @@ def _read_remote_files(file_meta: list[dict]) -> list[pd.DataFrame]:
 
 
 @st.cache_data(show_spinner=False)
-def load_all_datasets(data_dir: str,
-                      owner: str = DEFAULT_REPO_OWNER,
-                      repo: str = DEFAULT_REPO_NAME,
-                      branch: str = DEFAULT_REPO_BRANCH) -> pd.DataFrame:
-    # 1) 로컬 data/ 우선
-    dfs = _read_local_files(data_dir)
+def load_all_datasets(data_dir: Path) -> pd.DataFrame:
+    import os
+    data_dir = Path(data_dir)
+    if not data_dir.exists():
+        return pd.DataFrame(columns=["카테고리", "사이트명", "URL", "간략메모"])
 
-    # 2) 비어 있으면 GitHub 원격 data/에서 끌어오기
-    if not dfs:
-        rem_files = _list_github_data_files(owner, repo, branch, subdir=data_dir)
-        if rem_files:
-            dfs = _read_remote_files(rem_files)
+    # 파일 검색 (csv/xlsx)
+    paths = list(data_dir.rglob("*.csv")) + list(data_dir.rglob("*.xlsx"))
+
+    # 👉 진단 로그: 사이드바에서 확인 가능
+    st.session_state["_found_files"] = [str(p.relative_to(APP_DIR)) for p in paths]
+
+    dfs = []
+    for p in paths:
+        try:
+            if p.suffix.lower() == ".csv":
+                enc = detect_encoding(str(p))
+                df = pd.read_csv(p, encoding=enc)
+            else:
+                df = pd.read_excel(p)
+        except Exception:
+            continue
+
+        colmap = {}
+        url_col = find_url_column(df)
+        if url_col:
+            colmap[url_col] = "URL"
+        for c in df.columns:
+            cl = str(c).strip().lower()
+            if cl in ["site", "sitename", "name", "사이트", "사이트명"]:
+                colmap[c] = "사이트명"
+            if cl in ["category", "카테고리", "분류", "대분류"]:
+                colmap[c] = "카테고리"
+            if cl in ["notes", "메모", "간략메모", "설명", "비고"]:
+                colmap[c] = "간략메모"
+
+        df2 = df.rename(columns=colmap)
+        for col in ["카테고리", "사이트명", "URL", "간략메모"]:
+            if col not in df2.columns:
+                df2[col] = ""
+        dfs.append(df2[["카테고리", "사이트명", "URL", "간략메모"]])
 
     if not dfs:
         return pd.DataFrame(columns=["카테고리", "사이트명", "URL", "간략메모"])
@@ -218,6 +254,7 @@ def load_all_datasets(data_dir: str,
     for col in ["카테고리", "사이트명", "URL", "간략메모"]:
         merged[col] = merged[col].fillna("").astype(str).str.strip()
     return merged
+
 
 
 # ✅ 세션 초기화: 레포의 data/만 불러와 고정(누구나 새로고침해도 동일 시작점)
@@ -381,6 +418,23 @@ with st.sidebar:
         key="uploader",
     )
     st.caption(f"기본 데이터는 깃허브 {DEFAULT_REPO_OWNER}/{DEFAULT_REPO_NAME}@{DEFAULT_REPO_BRANCH} 의 data/ 폴더를 사용합니다.")
+
+with st.sidebar:
+    st.markdown("---")
+    if st.button("데이터 다시 읽기(캐시 초기화)"):
+        st.cache_data.clear()
+        st.session_state["base_df"] = load_all_datasets(DATA_DIR)
+        st.success("캐시 초기화 및 재로딩 완료!")
+
+    # 진단용: 앱이 실제로 본 파일 목록
+    if "_found_files" in st.session_state:
+        with st.expander("데이터 진단(발견된 파일)"):
+            if st.session_state["_found_files"]:
+                for p in st.session_state["_found_files"]:
+                    st.write("•", p)
+            else:
+                st.write("발견된 파일 없음 — 레포의 `data/` 경로와 파일 커밋을 확인하세요.")
+
 
 # ─────────────────────────────────────────────────────────
 # 업로드 처리(세션 한정 병합, 무한루프 방지)
