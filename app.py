@@ -27,6 +27,11 @@ st.caption("업로드된 데이터셋을 1차 근거로, ‘카테고리·사이
 DATA_DIR = "data"
 DEFAULT_TOPK = 10
 
+if "base_df" not in st.session_state:
+    st.session_state["base_df"] = load_all_datasets(DATA_DIR)
+
+
+
 ############################
 # 유틸 함수
 ############################
@@ -423,9 +428,11 @@ def rank_results(df: pd.DataFrame, query_text: str, wants_public=True, selected_
 # ─────────────────────────────────────────
 # 4) 결과 랭킹 & 표시
 # ─────────────────────────────────────────
+base_df = st.session_state["base_df"]  # 항상 세션의 최신본
+
 if st.button("검색 실행", type="primary") or query:
     if base_df.empty:
-        st.error("데이터가 비어 있습니다. data/ 폴더에 CSV/XLSX 파일을 넣거나 상단에서 업로드하세요.")
+        st.error("데이터가 비어 있습니다. data/ 폴더에 CSV/XLSX 파일을 넣거나 업로드하세요.")
     else:
         result_df = rank_results(
             base_df.copy(),
@@ -434,6 +441,7 @@ if st.button("검색 실행", type="primary") or query:
             selected_cats=selected_cats,
             topk=topk
         )
+        # ... (결과 출력 부분)
 
         if result_df.empty:
             st.info("결과가 없습니다. 키워드를 더 구체화하거나 카테고리 필터를 해제하세요.")
