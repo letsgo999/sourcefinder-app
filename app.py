@@ -187,20 +187,61 @@ with st.sidebar:
     st.caption("데이터 추가")
     uploaded = st.file_uploader("CSV/XLSX 추가 업로드(선택)", type=["csv", "xlsx"])
 
-    # 카테고리 옵션 (단 1회!)
-    sel_categories = sorted([c for c in base_df["카테고리"].unique() if c])
-    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[])
+    # ▼ 업로드가 있으면 즉시 병합 → 세션에 저장 → rerun
+    if uploaded is not None:
+        try:
+            if uploaded.name.lower().endswith(".csv"):
+                up_bytes = uploaded.read()
+                enc = chardet.detect(up_bytes).get("encoding") or "utf-8"
+                up_df = pd.read_csv(io.BytesIO(up_bytes), encoding=enc)
+            else:
+                up_df = pd.read_excel(uploaded)
 
-    # 안내문 추가
+            url_col = find_url_column(up_df)
+            colmap = {}
+            if url_col:
+                colmap[url_col] = "URL"
+            for c in up_df.columns:
+                cl = c.strip().lower()
+                if cl in ["site", "sitename", "name", "사이트", "사이트명"]:
+                    colmap[c] = "사이트명"
+                if cl in ["category", "카테고리", "분류", "대분류"]:
+                    colmap[c] = "카테고리"
+                if cl in ["notes", "메모", "간략메모", "설명", "비고"]:
+                    colmap[c] = "간략메모"
+
+            up_df2 = up_df.rename(columns=colmap)
+            for c in ["카테고리", "사이트명", "URL", "간략메모"]:
+                if c not in up_df2.columns:
+                    up_df2[c] = ""
+            up_df2 = up_df2[["카테고리", "사이트명", "URL", "간략메모"]]
+
+            # 세션의 df와 병합
+            st.session_state["base_df"] = (
+                pd.concat([st.session_state["base_df"], up_df2], ignore_index=True)
+                  .drop_duplicates()
+            )
+            st.success(f"추가 데이터 병합 완료! (총 {len(st.session_state['base_df'])}건)")
+            st.rerun()  # ← 카테고리 옵션 즉시 갱신
+        except Exception as e:
+            st.error(f"업로드 처리 실패: {e}")
+
+    # ▼ 최신 세션 df로 카테고리 옵션 생성
+    _cats = (
+        st.session_state["base_df"]["카테고리"]
+        .dropna().astype(str).str.strip()
+    )
+    sel_categories = sorted([c for c in _cats.unique() if c])
+    selected_cats = st.multiselect("카테고리(선택)", sel_categories, default=[], key="cats")
+
+    # 안내문
     st.markdown("---")
     st.markdown("**연관성 점수 읽기**")
     st.markdown(
-        """
-0.0 ~ 0.1 → 거의 무관  
-0.1 ~ 0.2 → 약간 관련  
-0.2 ~ 0.4 → 보통 관련  
-0.4 ~     → 강하게 관련
-        """
+        "0.0 ~ 0.1 → 거의 무관  \n"
+        "0.1 ~ 0.2 → 약간 관련  \n"
+        "0.2 ~ 0.4 → 보통 관련  \n"
+        "0.4 ~     → 강하게 관련"
     )
 
 
